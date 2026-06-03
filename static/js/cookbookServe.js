@@ -18,6 +18,9 @@ let _sshPrefix;
 let _getPlatform;
 let _isWindows;
 let _isMetal;
+let _isVulkan;
+let _getAllowedBackends;
+let _getBackendChoices;
 let _buildEnvPrefix;
 let _buildServeCmd;
 let _shellQuote;
@@ -78,6 +81,12 @@ function _serveBackendWarning(model, repo, backend, fields = {}) {
     return {
       title: 'GGUF needs llama.cpp or Ollama',
       body: 'This model looks like GGUF. vLLM/SGLang expect HuggingFace safetensors-style repos. Choose llama.cpp/Ollama for GGUF, or download a safetensors model for vLLM/SGLang.',
+    };
+  }
+  if (_isVulkan() && (backend === 'vllm' || backend === 'sglang' || backend === 'diffusers')) {
+    return {
+      title: 'Backend incompatible with Vulkan/RADV',
+      body: `${backend === 'vllm' ? 'vLLM' : backend === 'sglang' ? 'SGLang' : 'Diffusers'} requires CUDA or ROCm. This system has Vulkan/RADV AMD GPU support only. Use llama.cpp (with GGUF) or Ollama instead.`,
     };
   }
   return null;
@@ -511,10 +520,18 @@ function _rerenderCachedModels() {
         ? _byRepo[repo]
         : (_lastUsed || (_isLegacyFlat ? _allSs : {}));
       const detectedBackend = _detectBackend(m).backend;
-      const _allowedBackends = new Set(_isWindows()
-        ? ['llamacpp']
-        : (_isMetal() ? ['llamacpp', 'ollama'] : ['vllm', 'sglang', 'llamacpp', 'ollama', 'diffusers']));
+      const _allowedBackends = new Set(_getAllowedBackends());
+      let _defaultBackend = detectedBackend;
+      if (_isVulkan() && detectedBackend === 'vllm') {
+        _defaultBackend = 'llamacpp';
+      } else if (_isVulkan() && detectedBackend === 'sglang') {
+        _defaultBackend = 'llamacpp';
+      } else if (_isVulkan() && detectedBackend === 'diffusers') {
+        _defaultBackend = 'llamacpp';
+      }
       const defaultBackend = (ss._forceBackend && ss.backend && _allowedBackends.has(ss.backend))
+        ? ss.backend
+        : _defaultBackend;
         ? ss.backend
         : detectedBackend;
       const savedMatchesBackend = !!ss._forceBackend || (ss.backend || 'vllm') === detectedBackend;
@@ -560,25 +577,12 @@ function _rerenderCachedModels() {
         + `</div>`;
 
       let panelHtml = `<div class="hwfit-serve-panel">${_slotsHtml}`;
-      // Warn when serving a model whose download hasn't fully completed —
-      // the user CAN still hit Launch (vLLM/llama-server will start, then
-      // crash trying to read missing shards), but they should know.
-      if (m && (m.status === 'downloading' || m.status === 'stalled' || m.has_incomplete)) {
-        const _warnText = m.status === 'stalled'
-          ? `This model looks like a stale download shell (${esc(m.size || '0 KB')}). The weights aren't on disk — the serve will fail to load. Re-download first, or pick another model.`
-          : `This model's download isn't complete yet (${esc(m.size || 'partial')}). The serve will start but is likely to crash on a missing shard. Wait for the download to finish, or relaunch after it's done.`;
-        panelHtml += `<div class="hwfit-serve-warn" style="margin:0 0 8px;padding:6px 10px;border-radius:5px;font-size:11px;background:color-mix(in srgb, var(--color-warning, #f0ad4e) 14%, transparent);border:1px solid color-mix(in srgb, var(--color-warning, #f0ad4e) 40%, transparent);color:var(--color-warning, #f0ad4e);display:flex;gap:6px;align-items:flex-start;line-height:1.4;"><span aria-hidden="true">⚠</span><span>${_warnText}</span></div>`;
-      }
       // Row 1: Backend + Server + Env
       panelHtml += `<div class="hwfit-serve-row">`;
-      const _backendChoices = _isWindows()
-        ? [['llamacpp','llama.cpp']]
-        : _isMetal()
-        // Diffusers (diffusion_server.py) is CUDA-only — omit it on Metal.
-        ? [['llamacpp','llama.cpp'],['ollama','Ollama']]
-        : [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['ollama','Ollama'],['diffusers','Diffusers']];
+      const _backendChoices = _getBackendChoices();
       const backendOpts = _backendChoices.map(([v,l]) => `<option value="${v}"${defaultBackend===v?' selected':''}>${l}</option>`).join('');
-      panelHtml += `<label>${_l('Backend','Inference engine: vLLM, SGLang, llama.cpp, Ollama, or Diffusers')}<select class="hwfit-sf" data-field="backend">${backendOpts}</select></label>`;
+      const _backendTip = _isVulkan() ? 'Inference engine on Vulkan/RADV: llama.cpp (GGML_VULKAN) or Ollama — vLLM/SGLang need CUDA/ROCm' : 'Inference engine: vLLM, SGLang, llama.cpp, Ollama, or Diffusers';
+      panelHtml += `<label>${_l('Backend', _backendTip)}<select class="hwfit-sf" data-field="backend">${backendOpts}</select></label>`;
       panelHtml += `<input type="hidden" class="hwfit-sf" data-field="host" value="${esc(_es.remoteHost || '')}" />`;
       panelHtml += `<label>${_l('venv','Path to Python venv or conda env activate script')}<input type="text" class="hwfit-sf hwfit-sf-wide" data-field="venv" value="${esc(sv('venv', _es.envPath || _srvVenv || ''))}" placeholder="~/venv" /></label>`;
       const defaultPort = defaultBackend === 'ollama' ? '11434' : _nextAvailablePort();
@@ -594,6 +598,9 @@ function _rerenderCachedModels() {
       panelHtml += `<label>${_l('GPUs','Toggle which GPUs to use')}<div class="cookbook-gpu-group">${_gpuBtnsHtml}</div><input type="hidden" class="hwfit-sf" data-field="gpus" value="${esc(defaultGpus)}" /></label>`;
       panelHtml += `</div>`;
       panelHtml += `<div class="hwfit-serve-runtime-note" style="display:none;font-size:11px;line-height:1.35;color:var(--fg-muted);margin-top:-4px;"></div>`;
+      if (_isVulkan()) {
+        panelHtml += `<div class="hwfit-serve-runtime-note" style="font-size:11px;line-height:1.35;color:var(--accent,var(--red));margin-top:-4px;">⚠ Vulkan/RADV detected — vLLM, SGLang, and Diffusers require CUDA/ROCm and will not work on this GPU.</div>`;
+      }
       if (_ggufChoices.length > 1) {
         panelHtml += `<div class="hwfit-serve-row hwfit-backend-llamacpp">`;
         panelHtml += `<label class="hwfit-backend-llamacpp">${_l('GGUF File','Choose the exact GGUF artifact to serve from this cached model folder.')}<select class="hwfit-sf hwfit-sf-wide" data-field="gguf_file">${_ggufOptions}</select></label>`;
@@ -2106,6 +2113,9 @@ export function initServe(shared) {
   _getPlatform = shared._getPlatform;
   _isWindows = shared._isWindows;
   _isMetal = shared._isMetal;
+  _isVulkan = shared._isVulkan;
+  _getAllowedBackends = shared._getAllowedBackends || (() => ['vllm', 'sglang', 'llamacpp', 'ollama']);
+  _getBackendChoices = shared._getBackendChoices || () => [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['ollama','Ollama']];
   _buildEnvPrefix = shared._buildEnvPrefix;
   _buildServeCmd = shared._buildServeCmd;
   _shellQuote = shared._shellQuote;

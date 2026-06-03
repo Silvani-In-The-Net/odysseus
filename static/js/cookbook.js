@@ -179,6 +179,29 @@ export function _isMetal() {
   return ['metal', 'mps', 'apple'].includes(String(_hwfitCache?.system?.backend || '').toLowerCase());
 }
 
+/** Check if the detected (local) hardware is AMD GPU with Vulkan/RADV driver (no ROCm). Keys off the
+ *  hardware probe's backend value. Vulkan/RADV systems can only use llama.cpp or Ollama — vLLM and SGLang
+ *  require CUDA/ROCm. */
+export function _isVulkan() {
+  return String(_hwfitCache?.system?.backend || '').toLowerCase() === 'vulkan';
+}
+
+/** Return the allowed backends for the current hardware probe. */
+export function _getAllowedBackends(hostOrTask) {
+  if (_isWindows(hostOrTask)) return ['llamacpp'];
+  if (_isMetal(hostOrTask)) return ['llamacpp', 'ollama'];
+  if (_isVulkan(hostOrTask)) return ['llamacpp', 'ollama'];
+  return ['vllm', 'sglang', 'llamacpp', 'ollama', 'diffusers'];
+}
+
+/** Return the backend choices for the current hardware probe. */
+export function _getBackendChoices(hostOrTask) {
+  if (_isWindows(hostOrTask)) return [['llamacpp','llama.cpp']];
+  if (_isMetal(hostOrTask)) return [['llamacpp','llama.cpp'],['ollama','Ollama']];
+  if (_isVulkan(hostOrTask)) return [['llamacpp','llama.cpp'],['ollama','Ollama']];
+  return [['vllm','vLLM'],['sglang','SGLang'],['llamacpp','llama.cpp'],['ollama','Ollama'],['diffusers','Diffusers']];
+}
+
 /** Detect model-specific vLLM optimizations */
 function _detectModelOptimizations(modelName) {
   const n = (modelName || '').toLowerCase();
@@ -255,62 +278,79 @@ export function _detectToolParser(modelName) {
 // ── Backend detection ──
 
 export function _detectBackend(model) {
+  let backend = 'vllm';
+  let label = 'vLLM';
+  const warnings = [];
+
   if (model?.backend === 'ollama' || model?.is_ollama) {
-    return { backend: 'ollama', label: 'Ollama' };
+    return { backend: 'ollama', label: 'Ollama', warnings };
   }
   const q = (model.quant || '').toUpperCase();
   const sysBackend = String(_hwfitCache?.system?.backend || '').toLowerCase();
   const isRocm = sysBackend === 'rocm';
-  const isVulkan = sysBackend === 'vulkan';
-  const isConsumerAmd = isRocm || isVulkan;
+  const isConsumerAmd = isRocm || _isVulkan();
   const isAppleSilicon = ['metal', 'mps', 'apple'].includes(sysBackend);
   const _nm = `${model.repo_id || ''} ${model.path || ''} ${model.name || ''}`.toLowerCase();
   if (/\bmlx\b|mlx-|_mlx/i.test(_nm) || q.startsWith('MLX')) {
-    return { backend: 'unsupported', label: 'Unsupported' };
+    return { backend: 'unsupported', label: 'Unsupported', warnings };
   }
   const isAwqLike = /^AWQ|^GPTQ|^NVFP4/.test(q) || ['FP8', 'FP4', 'MXFP4', 'NF4', 'INT4', 'INT8', 'W4A16', 'W8A8', 'W8A16'].includes(q) || /\b(awq|gptq|fp8|fp4|nvfp4|mxfp4|nf4|int4|int8|w4a16|w8a8|w8a16)\b/i.test(_nm);
   const isGgufLike = model.is_gguf || /^Q[2-8]/.test(q) || /^IQ/.test(q) || q === 'GGUF' || _nm.includes('gguf');
 
   // Image gen models → diffusers
   if (model.is_image_gen || model.is_diffusion || model._tag === 'image') {
-    return { backend: 'diffusers', label: 'Diffusers' };
+    return { backend: 'diffusers', label: 'Diffusers', warnings };
   }
 
   // AWQ / GPTQ / FP8 are safetensors GPU-serving formats. Never route them
   // through llama.cpp/Ollama just because the host is Mac/Windows; those engines
   // need GGUF. The UI will warn/block on Metal where vLLM/SGLang aren't viable.
   if (isAwqLike) {
-    return { backend: 'vllm', label: 'vLLM' };
+    backend = 'vllm'; label = 'vLLM';
   }
 
   // GGUF → llama.cpp/Ollama-compatible.
   if (isGgufLike) {
-    return { backend: 'llamacpp', label: 'llama.cpp' };
+    backend = 'llamacpp'; label = 'llama.cpp';
   }
 
   // Windows → default to llama.cpp (no vLLM support on Windows)
   if (_isWindows()) {
-    return { backend: 'llamacpp', label: 'llama.cpp' };
+    backend = 'llamacpp'; label = 'llama.cpp';
   }
 
   // Apple Silicon (Metal) → llama.cpp (GGUF). vLLM/SGLang are CUDA/ROCm-only and
   // don't run on macOS; vLLM-native quantized models are already filtered out
   // of metal Cookbook results, so llama.cpp is always the right engine here.
   if (['metal', 'mps', 'apple'].includes(sysBackend)) {
-    return { backend: 'llamacpp', label: 'llama.cpp' };
+    backend = 'llamacpp'; label = 'llama.cpp';
   }
 
   // ROCm/AMD machines should not blindly default HF safetensors models to
   // vLLM. SGLang is the safer OpenAI-compatible default for plain HF text
   // repos there; llama.cpp still wins above whenever the model is GGUF.
-  // Vulkan (RDNA4 without ROCm) follows the same path — GGUF via llama.cpp
-  // is the primary serving engine for consumer AMD GPUs.
-  if (isConsumerAmd) {
-    return { backend: 'sglang', label: 'SGLang' };
+  // Vulkan (RDNA4 without ROCm) — GGUF via llama.cpp is the primary
+  // serving engine for consumer AMD GPUs; SGLang and vLLM need CUDA/ROCm.
+  if (isRocm) {
+    backend = 'sglang'; label = 'SGLang';
+  }
+  if (_isVulkan()) {
+    backend = 'llamacpp'; label = 'llama.cpp';
   }
 
   // Unquantized / BF16 / F16 → vLLM
-  return { backend: 'vllm', label: 'vLLM' };
+  if (backend === 'vllm') {
+    if (_isVulkan()) {
+      warnings.push('vLLM requires CUDA/ROCm — not available on Vulkan/RADV. Use llama.cpp instead.');
+    }
+  }
+  if (backend === 'sglang') {
+    if (_isVulkan()) {
+      warnings.push('SGLang requires CUDA/ROCm — not available on Vulkan/RADV. Use llama.cpp instead.');
+    }
+  }
+
+  return { backend, label, warnings };
 }
 
 // ── Command builders ──
