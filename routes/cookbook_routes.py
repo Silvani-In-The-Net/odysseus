@@ -37,7 +37,7 @@ from routes.cookbook_helpers import (
     _validate_local_dir, _validate_ssh_port, _validate_gpus, _shell_path,
     _ps_squote, _bash_squote, _validate_serve_cmd, _parse_serve_phase,
     _safe_env_prefix, _local_tooling_path_export, _append_serve_preflight_exit_lines,
-    _append_serve_exit_code_lines, _append_llama_cpp_linux_accel_build_lines, _cached_model_scan_script,
+    _append_serve_exit_code_lines, _append_llama_cpp_linux_accel_build_lines, _append_llama_cpp_linux_vulkan_build_lines, _cached_model_scan_script,
     _ollama_bind_from_cmd, _pip_install_fallback_chain, _venv_safe_local_pip_install_cmd,
     ModelDownloadRequest, ServeRequest,
 )
@@ -979,7 +979,15 @@ def setup_cookbook_routes() -> APIRouter:
                 runner_lines.append('      && cmake --build build -j"$NPROC" --target llama-server \\')
                 runner_lines.append('      && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
                 runner_lines.append('  else')
-                _append_llama_cpp_linux_accel_build_lines(runner_lines)
+                # Backend decision tree for Linux:
+                # - Explicit "vulkan" backend → Vulkan-only build (for RDNA4 when ROCm unavailable)
+                # - Auto-detect on AMD → dual Vulkan + HIP build (llama.cpp prefers Vulkan at runtime)
+                # - CUDA → CUDA build
+                # - No GPU toolchain → CPU-only build
+                if req.backend and req.backend.lower() == "vulkan":
+                    _append_llama_cpp_linux_vulkan_build_lines(runner_lines)
+                else:
+                    _append_llama_cpp_linux_accel_build_lines(runner_lines)
                 runner_lines.append('  fi')
                 runner_lines.append('  # If the native build failed, fall back to the Python bindings.')
                 runner_lines.append('  if ! command -v llama-server &>/dev/null && ! python3 -c "import llama_cpp" 2>/dev/null; then')
@@ -1406,6 +1414,68 @@ def setup_cookbook_routes() -> APIRouter:
                 gpus[0]["busy"] = True
         return gpus
 
+    async def _probe_vulkan_sysfs(host: str | None, ssh_port: str | None) -> list[dict]:
+        """Probe AMD GPU via /sys/class/drm and Vulkan/RADV driver (no ROCm required).
+
+        Mirrors _probe_amd_sysfs but reports backend="vulkan" for cards where
+        rocminfo is unavailable but RADV/Mesa drivers are present.
+        """
+        out, err = await _run_gpu_shell("ls -1 /sys/class/drm 2>/dev/null", host, ssh_port, timeout=4)
+        if err is not None or not out:
+            return []
+        # Soft check: try vulkaninfo to confirm RADV driver is present
+        vulkan_out, _ = await _run_gpu_shell("vulkaninfo --summary 2>/dev/null || vulkaninfo 2>/dev/null || true", host, ssh_port, timeout=5)
+        if not vulkan_out or ("RADV" not in vulkan_out and "radeonsi" not in vulkan_out):
+            return []
+        gpus = []
+        for entry in out.split():
+            if not entry.startswith("card") or "-" in entry:
+                continue
+            base = f"/sys/class/drm/{entry}/device"
+            vendor = await _gpu_read_file(f"{base}/vendor", host, ssh_port)
+            if vendor != "0x1002":
+                continue
+            vram_raw = await _gpu_read_file(f"{base}/mem_info_vram_total", host, ssh_port)
+            vis_raw = await _gpu_read_file(f"{base}/mem_info_vis_vram_total", host, ssh_port)
+            gtt_raw = await _gpu_read_file(f"{base}/mem_info_gtt_total", host, ssh_port)
+            vram_bytes = int(vram_raw) if vram_raw and vram_raw.isdigit() else 0
+            vis_bytes = int(vis_raw) if vis_raw and vis_raw.isdigit() else 0
+            gtt_bytes = int(gtt_raw) if gtt_raw and gtt_raw.isdigit() else 0
+            total_bytes = max(vram_bytes, vis_bytes)
+            used_attr = "mem_info_vis_vram_used" if vis_bytes and vis_bytes >= vram_bytes else "mem_info_vram_used"
+            unified = bool(vis_bytes and vis_bytes >= vram_bytes)
+            if total_bytes <= 0:
+                total_bytes = gtt_bytes
+                used_attr = "mem_info_gtt_used"
+                unified = True
+            if total_bytes <= 0:
+                continue
+            used_raw = await _gpu_read_file(f"{base}/{used_attr}", host, ssh_port)
+            used_bytes = int(used_raw) if used_raw and used_raw.isdigit() else 0
+            name = await _gpu_read_file(f"{base}/product_name", host, ssh_port)
+            if not name:
+                device = await _gpu_read_file(f"{base}/device", host, ssh_port)
+                name = f"AMD GPU {device or entry}"
+            total_mb = max(0, int(total_bytes / (1024 * 1024)))
+            used_mb = max(0, min(total_mb, int(used_bytes / (1024 * 1024))))
+            free_mb = max(0, total_mb - used_mb)
+            gtt_used_raw = await _gpu_read_file(f"{base}/mem_info_gtt_used", host, ssh_port)
+            gtt_used_mb = max(0, int(int(gtt_used_raw) / (1024 * 1024))) if (gtt_used_raw and gtt_used_raw.isdigit()) else 0
+            gpus.append({
+                "index": len(gpus), "name": name, "uuid": entry,
+                "free_mb": free_mb, "total_mb": total_mb, "used_mb": used_mb,
+                "gtt_used_mb": gtt_used_mb,
+                "util_pct": 0, "busy": bool(total_mb and (free_mb / total_mb) < 0.85),
+                "processes": [], "backend": "vulkan", "source": "vulkan-sysfs",
+                "unified_memory": unified,
+            })
+        if gpus:
+            processes = await _probe_gpu_device_processes(host, ssh_port)
+            if processes:
+                gpus[0]["processes"] = processes
+                gpus[0]["busy"] = True
+        return gpus
+
     @router.get("/api/cookbook/gpus")
     async def list_gpus(request: Request, host: str | None = None, ssh_port: str | None = None):
         """Probe GPU memory/process state locally or via SSH.
@@ -1543,6 +1613,18 @@ def setup_cookbook_routes() -> APIRouter:
                 "gpus": amd_gpus,
                 "backend": "rocm",
                 "source": "amd-sysfs",
+                "fallback_from": "nvidia-smi",
+                "nvidia_error": nvidia_error,
+            }
+
+        # ROCm not available — try Vulkan/RADV as fallback for AMD GPUs
+        vulkan_gpus = await _probe_vulkan_sysfs(host, ssh_port)
+        if vulkan_gpus:
+            return {
+                "ok": True,
+                "gpus": vulkan_gpus,
+                "backend": "vulkan",
+                "source": "vulkan-sysfs",
                 "fallback_from": "nvidia-smi",
                 "nvidia_error": nvidia_error,
             }

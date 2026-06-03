@@ -7,8 +7,9 @@ from fastapi import APIRouter
 # Backends the manual hardware simulator accepts. Must stay a subset of what
 # services.hwfit.fit understands so a simulated box ranks like a real one:
 # "metal" routes through the Apple-Silicon path (GGUF-only, llama.cpp/Ollama),
+# "vulkan" routes through the consumer AMD GGUF path (llama.cpp with RADV),
 # the CPU backends through the RAM/offload path, cuda/rocm through vLLM.
-_MANUAL_BACKENDS = {"cuda", "rocm", "metal", "cpu_x86", "cpu_arm"}
+_MANUAL_BACKENDS = {"cuda", "rocm", "vulkan", "metal", "cpu_x86", "cpu_arm"}
 
 
 def _apply_manual_hardware(system, manual_mode="", manual_gpu_count="", manual_vram_gb="", manual_ram_gb="", manual_backend=""):

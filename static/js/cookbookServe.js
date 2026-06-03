@@ -59,13 +59,13 @@ function _serveBackendWarning(model, repo, backend, fields = {}) {
   if (awqLike && (backend === 'llamacpp' || backend === 'ollama')) {
     return {
       title: 'AWQ needs vLLM or SGLang',
-      body: 'This model looks like AWQ/GPTQ/FP8 safetensors. llama.cpp and Ollama need GGUF files, so this backend cannot serve it. Choose vLLM/SGLang on a CUDA/ROCm GPU server, or download a GGUF version for llama.cpp/Ollama.',
+      body: 'This model looks like AWQ/GPTQ/FP8 safetensors. llama.cpp and Ollama need GGUF files, so this backend cannot serve it. Choose vLLM/SGLang on a CUDA/ROCm/Vulkan GPU server, or download a GGUF version for llama.cpp/Ollama.',
     };
   }
   if (awqLike && _isMetal() && (backend === 'vllm' || backend === 'sglang')) {
     return {
       title: 'AWQ is not a unified-memory path',
-      body: 'This model looks like AWQ/GPTQ/FP8 safetensors. AWQ is for vLLM/SGLang on CUDA/ROCm-style GPU servers, not local unified-memory llama.cpp/Ollama serving. For unified memory, download a GGUF model and use llama.cpp/Ollama.',
+      body: 'This model looks like AWQ/GPTQ/FP8 safetensors. AWQ is for vLLM/SGLang on CUDA/ROCm/Vulkan-style GPU servers, not local unified-memory llama.cpp/Ollama serving. For unified memory, download a GGUF model and use llama.cpp/Ollama.',
     };
   }
   if (awqLike && fields.unified_mem) {

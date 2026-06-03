@@ -324,10 +324,11 @@ def test_llama_cpp_linux_bootstrap_prefers_rocm_before_cuda():
     script = "\n".join(runner_lines)
 
     assert 'command -v hipconfig &>/dev/null || [ -d /opt/rocm ] || [ -n "$ROCM_PATH" ] || [ -n "$HIP_PATH" ]' in script
-    assert 'cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_HIP=ON' in script
+    assert 'DGGML_VULKAN=ON' in script
+    assert 'DGGML_HIP=ON' in script
     assert 'cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON' in script
     assert script.index('DGGML_HIP=ON') < script.index('DGGML_CUDA=ON')
-    assert 'ROCm/HIP detected — building llama-server with HIP support' in script
+    assert 'ROCm/HIP detected — building llama-server with Vulkan + HIP support' in script
 
 
 def test_llama_cpp_linux_bootstrap_keeps_cpu_fallback_when_no_gpu_toolchain():

@@ -35,7 +35,7 @@ _BW_KEYS_SORTED = sorted(GPU_BANDWIDTH.keys(), key=len, reverse=True)
 
 # metal: backstop for Apple Silicon chips not in GPU_BANDWIDTH (e.g. a future
 # M5) — the named chips above take the accurate bandwidth path instead.
-FALLBACK_K = {"cuda": 220, "rocm": 180, "metal": 150, "cpu_x86": 70, "cpu_arm": 90}
+FALLBACK_K = {"cuda": 220, "rocm": 180, "vulkan": 150, "metal": 150, "cpu_x86": 70, "cpu_arm": 90}
 
 USE_CASE_WEIGHTS = {
     "general":    (0.45, 0.30, 0.15, 0.10),
@@ -527,7 +527,7 @@ def rank_models(system, use_case=None, limit=50, search=None, sort="score", quan
     # Unknown family (no rocminfo) is left untouched to avoid hiding models from
     # a possibly-capable Instinct box on a misdetect.
     gpu_family = (system.get("gpu_family") or "").lower()
-    consumer_amd = system_backend == "rocm" and gpu_family == "rdna"
+    consumer_amd = system_backend in ("rocm", "vulkan") and gpu_family == "rdna"
 
     for m in models:
         native_q = _native_quant(m)

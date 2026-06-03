@@ -41,7 +41,7 @@ def test_manual_metal_vram_and_count_math():
 
 def test_manual_backend_whitelist_matches_fit_backends():
     """Guard against drift: every manual backend must be one fit.py understands."""
-    assert _MANUAL_BACKENDS == {"cuda", "rocm", "metal", "cpu_x86", "cpu_arm"}
+    assert _MANUAL_BACKENDS == {"cuda", "rocm", "vulkan", "metal", "cpu_x86", "cpu_arm"}
 
 
 def test_unknown_manual_backend_falls_back_to_cuda():

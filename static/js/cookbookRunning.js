@@ -105,7 +105,7 @@ function _terminalServeDiagnosis(task, outputText) {
   if (_serveTaskLooksAwqOnLocalBackend(task, out)) {
     return {
       message: 'AWQ/GPTQ/FP8 cannot be served through llama.cpp/Ollama unified-memory mode.',
-      suggestion: 'Suggested action: use vLLM/SGLang on a compatible CUDA/ROCm GPU server, or download a GGUF version for llama.cpp/Ollama/unified-memory serving.',
+      suggestion: 'Suggested action: use vLLM/SGLang on a compatible CUDA/ROCm/Vulkan GPU server, or download a GGUF version for llama.cpp/Ollama/unified-memory serving.',
       fixes: [
         { label: 'Find GGUF download', action: () => _openDownloadForGgufTask(task) },
         { label: 'Edit serve', action: (panel) => _openServeEditForTask(task) },
@@ -115,7 +115,7 @@ function _terminalServeDiagnosis(task, outputText) {
   if (_serveTaskLooksAwqWithoutUsableAccelerator(task, out)) {
     return {
       message: 'AWQ/GPTQ/FP8 needs a working vLLM/SGLang accelerator path; this server did not expose one.',
-      suggestion: 'Suggested action: choose a CUDA/ROCm server where vLLM/SGLang can see the GPU, or download a GGUF version and serve it with llama.cpp/Ollama.',
+      suggestion: 'Suggested action: choose a CUDA/ROCm/Vulkan server where vLLM/SGLang can see the GPU, or download a GGUF version and serve it with llama.cpp/Ollama.',
       fixes: [
         { label: 'Find GGUF download', action: () => _openDownloadForGgufTask(task) },
         { label: 'Edit serve', action: (panel) => _openServeEditForTask(task) },
@@ -2354,7 +2354,7 @@ async function _reconnectTask(el, task) {
                   ? 'llama.cpp build stopped before the server became reachable.'
                   : 'Serve stopped before the model became reachable.',
                 suggestion: _serveTaskLooksAwqOnLocalBackend(task, lastOutput)
-                  ? 'Suggested action: use vLLM/SGLang on a compatible CUDA/ROCm GPU server, or download a GGUF version for llama.cpp/Ollama/unified-memory serving.'
+                  ? 'Suggested action: use vLLM/SGLang on a compatible CUDA/ROCm/Vulkan GPU server, or download a GGUF version for llama.cpp/Ollama/unified-memory serving.'
                   : /Native llama-server not found|building llama-server|llama\.cpp/i.test(lastOutput)
                   ? 'Suggested action: copy the troubleshooting bundle, then edit serve settings. For the quickest local/CPU path, use Ollama or a prebuilt llama-server; source builds can take several minutes and fail if build dependencies are incomplete.'
                   : 'Suggested action: copy the troubleshooting bundle, then edit serve settings or relaunch with a CPU/backend fallback.',

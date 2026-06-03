@@ -524,6 +524,10 @@ def _append_llama_cpp_linux_accel_build_lines(runner_lines: list[str]) -> None:
     Cookbook already detects AMD GPUs elsewhere, but the llama.cpp bootstrap used
     to hard-wire CUDA on Linux. That made ROCm hosts attempt a CUDA configure and
     fail with "CUDA Toolkit not found" instead of building with HIP.
+
+    For AMD/Linux, builds with both Vulkan and HIP enabled so llama.cpp can
+    auto-prefer Vulkan at runtime (its initialization order: CUDA > Vulkan > HIP).
+    HIP remains available as a fallback for users who need it.
     """
     # Detect pip-installed nvcc (from vLLM/nvidia CUDA wheels) and put it on PATH
     # so cmake's CUDA configure can find it. We keep this after the ROCm/HIP
@@ -540,8 +544,8 @@ def _append_llama_cpp_linux_accel_build_lines(runner_lines: list[str]) -> None:
     runner_lines.append('        export HIPCXX="${HIPCXX:-$(hipconfig -l)/clang}"')
     runner_lines.append('        export HIP_PATH="${HIP_PATH:-$(hipconfig -R)}"')
     runner_lines.append('      fi')
-    runner_lines.append('      echo "[odysseus] ROCm/HIP detected — building llama-server with HIP support..."')
-    runner_lines.append('      cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_HIP=ON && cmake --build build -j"$NPROC" --target llama-server && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
+    runner_lines.append('      echo "[odysseus] ROCm/HIP detected — building llama-server with Vulkan + HIP support..."')
+    runner_lines.append('      cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DGGML_HIP=ON -DLLAMA_BUILD_SERVER=ON && cmake --build build -j"$NPROC" --target llama-server && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
     runner_lines.append('    elif command -v nvcc &>/dev/null; then')
     runner_lines.append('      echo "[odysseus] CUDA nvcc found — building llama-server with CUDA (GPU) support..."')
     runner_lines.append('      cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON && cmake --build build -j"$NPROC" --target llama-server && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
@@ -551,6 +555,18 @@ def _append_llama_cpp_linux_accel_build_lines(runner_lines: list[str]) -> None:
     runner_lines.append('      echo "[odysseus]   Install ROCm for AMD GPUs or vLLM/CUDA tooling for NVIDIA, then re-launch this serve task."')
     runner_lines.append('      cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j"$NPROC" --target llama-server && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
     runner_lines.append('    fi')
+
+
+def _append_llama_cpp_linux_vulkan_build_lines(runner_lines: list[str]) -> None:
+    """Append Linux llama.cpp build lines that use the Vulkan backend only.
+
+    This path is used when ROCm/HIP is not available but Vulkan/RADV drivers
+    are present on the host. Vulkan uses system Mesa drivers and does not
+    require ROCm toolchain detection.
+    """
+    runner_lines.append('    cd ~/llama.cpp && rm -rf build')
+    runner_lines.append('    echo "[odysseus] Building llama-server with Vulkan (GPU) support..."')
+    runner_lines.append('    cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_VULKAN=ON -DLLAMA_BUILD_SERVER=ON && cmake --build build -j"$NPROC" --target llama-server && ln -sf ~/llama.cpp/build/bin/llama-server ~/bin/llama-server')
 
 class ModelDownloadRequest(BaseModel):
     repo_id: str
@@ -573,6 +589,7 @@ class ServeRequest(BaseModel):
     hf_token: str | None = None
     gpus: str | None = None
     platform: str | None = None    # "linux", "termux", or "windows"
+    backend: str | None = None     # "cuda", "rocm", "vulkan", or None (auto-detect)
 
 
 def _parse_serve_phase(snapshot: str, task_type: str = "serve") -> dict:

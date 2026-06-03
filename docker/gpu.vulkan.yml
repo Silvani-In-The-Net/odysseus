@@ -1,0 +1,15 @@
+# AMD Vulkan GPU overlay — for consumer RDNA cards where ROCm doesn't work.
+# Enable by setting COMPOSE_FILE in .env:
+#   COMPOSE_FILE=docker-compose.yml:docker/gpu.vulkan.yml
+#
+# Requires RADV Vulkan drivers on the host (Mesa). The host user running
+# Docker must be in the `video` and `render` groups.
+#
+# This overlay only passes the host GPU through to the container via /dev/dri.
+# Vulkan does not need /dev/kfd or ROCm userspace.
+# Build llama.cpp with -DGGML_VULKAN=ON (or dual-backend with -DGGML_HIP=ON)
+# and serve GGUF models through the Cookbook.
+services:
+  odysseus:
+    devices:
+      - /dev/dri

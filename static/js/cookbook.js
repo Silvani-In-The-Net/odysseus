@@ -260,6 +260,8 @@ export function _detectBackend(model) {
   const q = (model.quant || '').toUpperCase();
   const sysBackend = String(_hwfitCache?.system?.backend || '').toLowerCase();
   const isRocm = sysBackend === 'rocm';
+  const isVulkan = sysBackend === 'vulkan';
+  const isConsumerAmd = isRocm || isVulkan;
   const isAppleSilicon = ['metal', 'mps', 'apple'].includes(sysBackend);
   const _nm = `${model.repo_id || ''} ${model.path || ''} ${model.name || ''}`.toLowerCase();
   if (/\bmlx\b|mlx-|_mlx/i.test(_nm) || q.startsWith('MLX')) {
@@ -300,7 +302,9 @@ export function _detectBackend(model) {
   // ROCm/AMD machines should not blindly default HF safetensors models to
   // vLLM. SGLang is the safer OpenAI-compatible default for plain HF text
   // repos there; llama.cpp still wins above whenever the model is GGUF.
-  if (isRocm) {
+  // Vulkan (RDNA4 without ROCm) follows the same path — GGUF via llama.cpp
+  // is the primary serving engine for consumer AMD GPUs.
+  if (isConsumerAmd) {
     return { backend: 'sglang', label: 'SGLang' };
   }
 
@@ -1260,7 +1264,7 @@ function _wireTabEvents(body) {
         if (!models.length && vram > 0) {
           models = await _fetchLatest(0);
         }
-        if (['rocm', 'metal', 'mps', 'apple', 'generic', 'cpu'].includes(hwInfo.backend)) {
+        if (['rocm', 'vulkan', 'metal', 'mps', 'apple', 'generic', 'cpu'].includes(hwInfo.backend)) {
           models = models.filter(m => !_hfModelLooksAwqLike(m));
         }
         if (!models.length) {
@@ -1566,7 +1570,7 @@ function _renderRecipes() {
   html += '<label>GPUs<input class="hwfit-manual-gpus" type="text" inputmode="numeric" placeholder="1"></label>';
   html += '<label>VRAM per GPU<input class="hwfit-manual-vram" type="text" inputmode="decimal" placeholder="8 GB"></label>';
   html += '<label>Total RAM<input class="hwfit-manual-ram" type="text" inputmode="decimal" placeholder="32 GB"></label>';
-  html += '<select class="hwfit-manual-backend"><option value="cuda">CUDA</option><option value="rocm">ROCm</option></select>';
+  html += '<select class="hwfit-manual-backend"><option value="cuda">CUDA</option><option value="rocm">ROCm</option><option value="vulkan">Vulkan</option></select>';
   html += '<button type="button" class="hwfit-hw-manual-save">✓ Apply</button>';
   html += '<button type="button" class="hwfit-hw-manual-clear">× Clear</button>';
   html += '</div>';

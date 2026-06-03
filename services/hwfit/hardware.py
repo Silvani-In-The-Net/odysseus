@@ -277,6 +277,100 @@ def _detect_amd():
         return None
 
 
+def _detect_vulkan():
+    """Detect AMD GPUs via Vulkan/RADV driver (fallback when rocminfo unavailable).
+
+    When ROCm/HIP is not installed but RADV (Mesa's AMD Vulkan driver) is present,
+    this path enumerates AMD GPUs from /sys/class/drm and reports backend="vulkan".
+    Works locally and over SSH.
+    """
+    def _read(path):
+        if _remote_host:
+            val = _run(["cat", path])
+            return val.strip() if val else None
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                return f.read().strip()
+        except Exception:
+            return None
+
+    def _list_drm_cards():
+        if _remote_host:
+            out = _run(["ls", "/sys/class/drm"])
+            if not out:
+                return []
+            return [e for e in out.split() if e.startswith("card") and "-" not in e]
+        try:
+            return [e for e in os.listdir("/sys/class/drm") if e.startswith("card") and "-" not in e]
+        except Exception:
+            return []
+
+    def _amd_arch():
+        """Best-effort AMD GPU ISA from sysfs product_name when rocminfo is unavailable."""
+        cards = _list_drm_cards()
+        for entry in cards:
+            base = f"/sys/class/drm/{entry}/device"
+            name = _read(f"{base}/product_name") or ""
+            if "9070" in name or "9060" in name:
+                return "gfx1201", "rdna4"
+            if "7800" in name or "7900" in name or "7700" in name or "7600" in name:
+                return "gfx1100", "rdna3"
+            if "6800" in name or "6900" in name or "6700" in name:
+                return "gfx1030", "rdna2"
+        return "", "unknown"
+
+    try:
+        # Check if vulkaninfo can enumerate the GPU (RADV driver present)
+        vulkan_out = _run(["vulkaninfo", "--summary"]) or _run(["vulkaninfo"]) or ""
+        if not vulkan_out or "RADV" not in vulkan_out:
+            # Also check for Mesa RADV in device listing as a softer check
+            if not re.search(r"RADV|radeonsi", vulkan_out):
+                return None
+
+        cards = []
+        is_apu = False
+        for _cidx, entry in enumerate(_list_drm_cards()):
+            base = f"/sys/class/drm/{entry}/device"
+            vendor = _read(f"{base}/vendor")
+            if vendor != "0x1002":
+                continue
+            vram_raw = _read(f"{base}/mem_info_vram_total")
+            vis_raw = _read(f"{base}/mem_info_vis_vram_total")
+            gtt_raw = _read(f"{base}/mem_info_gtt_total")
+            vram_val = int(vram_raw) if vram_raw and vram_raw.isdigit() else 0
+            vis_val = int(vis_raw) if vis_raw and vis_raw.isdigit() else 0
+            gtt_val = int(gtt_raw) if gtt_raw and gtt_raw.isdigit() else 0
+            vram_bytes = max(vram_val, vis_val)
+            if vram_bytes <= 0:
+                vram_bytes = gtt_val
+            if vis_val and vis_val >= vram_val:
+                is_apu = True
+            if vram_bytes <= 0:
+                continue
+            name = _read(f"{base}/product_name") or f"AMD GPU ({entry})"
+            cards.append({"index": _cidx, "name": name, "vram_gb": vram_bytes / (1024**3)})
+
+        if not cards:
+            return None
+        total_vram = sum(c["vram_gb"] for c in cards)
+        groups = _group_gpus(cards)
+        gfx, family = _amd_arch()
+        return {
+            "gpu_name": cards[0]["name"],
+            "gpu_vram_gb": round(total_vram, 1),
+            "gpu_count": len(cards),
+            "gpus": cards,
+            "gpu_groups": groups,
+            "homogeneous": len(groups) <= 1,
+            "backend": "vulkan",
+            "unified_memory": is_apu,
+            "gpu_arch": gfx,
+            "gpu_family": family,
+        }
+    except Exception:
+        return None
+
+
 def _detect_apple_silicon():
     """Detect Apple Silicon (M-series) GPUs.
 
@@ -623,7 +717,7 @@ def detect_system(host="", ssh_port="", platform="", fresh=False):
     cpu_cores = _get_cpu_count()
     cpu_name = _get_cpu_name()
 
-    gpu_info = _detect_apple_silicon() or _detect_nvidia() or _detect_amd()
+    gpu_info = _detect_apple_silicon() or _detect_nvidia() or _detect_amd() or _detect_vulkan()
 
     if gpu_info:
         result = {
